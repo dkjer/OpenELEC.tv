@@ -1,0 +1,310 @@
+#!/bin/bash
+
+################################################################################
+#      This file is part of OpenELEC - http://www.openelec.tv
+#      Copyright (C) 2009-2012 Stephan Raue (stephan@openelec.tv)
+#
+#  This Program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2, or (at your option)
+#  any later version.
+#
+#  This Program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with OpenELEC.tv; see the file COPYING.  If not, write to
+#  the Free Software Foundation, 51 Franklin Street, Suite 500, Boston, MA 02110, USA.
+#  http://www.gnu.org/copyleft/gpl.html
+################################################################################
+
+# usage:   sudo ./create_sdcard [<drive>]
+# example: sudo ./create_sdcard /dev/disk1
+
+read_input(){
+	local MESSAGE="${1}"
+	if [ -n "${MESSAGE}" ];then
+		echo "${MESSAGE}"
+	fi
+	read INPUT
+}
+
+info(){
+	local MESSAGE=$1
+	echo "INFO: ${MESSAGE}"
+}
+
+warning(){
+	local MESSAGE=$1
+	echo "WARNING: ${MESSAGE}"
+}
+
+error(){
+	local MESSAGE=$1
+	echo "ERROR: ${MESSAGE}"
+	echo ""
+	exit 1
+}
+
+plist_value() {
+	echo "$1" | xpath "//key[.='$2']/following-sibling::*[1]/text()" 2> /dev/null
+}
+
+choose_install_device(){
+	echo ""
+	echo "#########################################################"
+	echo "#                                                       #"
+	echo "#            OpenELEC Installer for Mac OS X            #"
+	echo "#                                                       #"
+	echo "#########################################################"
+	echo "#                                                       #"
+	echo "#     This will wipe ALL data off your chosen drive     #"
+	echo "#    Please read the instructions and use carefully..   #"
+	echo "#                                                       #"
+	echo "#########################################################"
+	echo ""
+	echo "The following devices were found:"
+	echo ""
+	local devices=$(diskutil list -plist | xpath "//key[.='WholeDisks']/following-sibling::*[1]//string" 2>/dev/null | sed 's/\<string\>//g' | sed 's/\<\/string\>/ /g')
+	echo "[Device]  [Media name]  [Total size]"
+	local found_device=0
+	for device in $devices; do
+		if [ "$device" = "disk0" ]; then
+			continue
+		fi
+		local device_info=$(diskutil info -plist $device)
+		local size=$(plist_value "$device_info" TotalSize)
+		local mediaName=$(plist_value "$device_info" MediaName)
+		echo "$device  $mediaName  $size bytes"
+		found_device=1
+	done
+	if [ "${found_device}" -eq 0 ]; then
+		error "Could not find a suitable device to install to!"
+	fi
+	echo ""
+	INPUT=""
+	while [ -z "${INPUT}" ];do
+		read_input "Please enter the install device (e.g. disk1): "
+		echo ""
+	done
+	INSTALL_NAME="${INPUT}"
+	if [ "${INSTALL_NAME}" = "disk0" ]; then
+		error "Cannot install this on /dev/disk0."
+	fi
+	INSTALL_DEVICE="/dev/${INSTALL_NAME}"
+}
+
+check_install_device(){
+	diskutil list ${INSTALL_DEVICE}
+	if [ $? -ne 0 ]; then
+		error "Device ${INSTALL_DEVICE} appears to be invalid"
+	fi
+	echo ""
+	warning "*** ALL DATA WILL BE WIPED FROM ${INSTALL_DEVICE} ***"
+	echo ""
+	read -p "Are you sure you want to continue? " -n 1
+	if [[ ! $REPLY =~ ^[Yy]$ ]];then
+		echo ""
+		echo ""
+		echo "Goodbye!"
+		echo ""
+		exit 1
+	fi
+	echo ""
+}
+
+SYSLINUX_VERSION=syslinux-5.01
+download_syslinux(){
+	if [ ! -d "${SYSLINUX_VERSION}" ] ; then
+		set -e
+		info "Downloading syslinux"
+		curl -O https://www.kernel.org/pub/linux/utils/boot/syslinux/${SYSLINUX_VERSION}.tar.bz2
+		info "Extracting syslinux files"
+		tar -xzf ${SYSLINUX_VERSION}.tar.bz
+		set +e
+	fi
+}
+
+unmount_install_device_partitions(){
+	info "Unmounting ${INSTALL_DEVICE}*"
+	diskutil unmountDisk ${INSTALL_DEVICE}
+	if [ $? -ne 0 ]; then
+		#warning "Unmount failed.  Attemping to force unmount of ${INSTALL_DEVICE}*"
+		#diskutil unmountDisk force ${INSTALL_DEVICE}
+		#if [ $? -ne 0 ]; then
+			error "Could not unmount ${INSTALL_DEVICE}*"
+		#fi
+	fi
+}
+
+mark_active(){
+	unmount_install_device_partitions
+	info "Marking boot partition active"
+	cat << EOF | fdisk -e ${INSTALL_DEVICE}
+f 1
+w
+q
+EOF
+	if [ $? -ne 0 ]; then
+		error "Could not create partitions."
+	fi
+	echo ""
+}
+
+check_dependency(){
+	local dep=$1
+	local source="$2"
+	which $dep > /dev/null
+	if [ $? -ne 0 ]; then
+		warning "OpenELEC.tv missing tool - Installation will quit"
+		warning "We can't find the required tool \"$dep\""
+		warning "Please install it from $2"
+		exit 1
+	fi
+}
+
+check_dependencies(){
+	check_dependency fuse-ext2 "http://sourceforge.net/projects/fuse-ext2/"
+}
+
+format_install_device(){
+	echo ""
+	echo ""
+	echo "Creating OpenELEC Install Stick"
+	echo ""
+	info "Creating partitions on ${INSTALL_DEVICE}"
+	diskutil partitionDisk ${INSTALL_DEVICE} 2 MBRFormat "MS-DOS FAT32" SYSTEM 256000S fuse-ext2 %noformat% R32000S
+	if [ $? -ne 0 ]; then
+		error "Could not partition ${INSTALL_DEVICE}"
+	fi
+	info "Formatting Storage partition"
+	fuse-ext2.mke2fs -T ext4 -L Storage ${INSTALL_DEVICE}s2
+
+	# Sadly, Mac insists on adding garbage to anything that is mounted read-write.
+	local device_info=$(diskutil list -plist ${INSTALL_DEVICE}s1)
+	local MOUNTPOINT=$(plist_value "$device_info" MountPoint)
+	if [ -z "${MOUNTPOINT}" ]; then
+		error "Could not find mount point for ${INSTALL_DEVICE}"
+	fi
+	touch "${MOUNTPOINT}/.metadata_never_index"
+	touch "${MOUNTPOINT}/.Trashes"
+	mkdir "${MOUNTPOINT}/.fseventsd"
+	touch "${MOUNTPOINT}/.fseventsd/no_log"
+}
+
+install_bootloader(){
+	mark_active
+
+	unmount_install_device_partitions
+	info "Installing Bootloader on ${INSTALL_DEVICE}"
+	dd conv=notrunc bs=440 count=1 if=${SYSLINUX_VERSION}/mbr/mbr.bin of=${INSTALL_DEVICE} 
+	if [ $? -ne 0 ]; then
+		error "Could not install Bootloader on ${INSTALL_DEVICE}"
+	fi
+}
+
+
+install_files(){
+	info "Waiting for ${INSTALL_DEVICE}s1 to become available"
+	local MAX_RETRIES=10
+	local retry=0
+	local success=0
+	while [ $retry -lt $MAX_RETRIES ]; do
+		diskutil mount ${INSTALL_DEVICE}s1
+		if [ $? -eq 0 ]; then
+			success=1
+			break
+		fi
+		sleep 1
+		retry=$((retry + 1))
+	done
+	if [ $success -eq 0 ]; then
+		error "Could not mount ${INSTALL_DEVICE}s1"
+	fi
+	local device_info=$(diskutil info -plist ${INSTALL_DEVICE}s1)
+	local MOUNTPOINT=$(plist_value "$device_info" MountPoint)
+	if [ -z "${MOUNTPOINT}" ]; then
+		error "Could not find mount point for ${INSTALL_DEVICE}"
+	fi
+
+	info "Copying SYSTEM and KERNEL files to '${MOUNTPOINT}'"
+	cp -a target/KERNEL "${MOUNTPOINT}/kernel.img"
+	cp -a target/SYSTEM "${MOUNTPOINT}/SYSTEM"
+	info "Creating bootloader configuration on '${MOUNTPOINT}'"
+	echo "boot=/dev/mmcblk0p1 disk=/dev/mmcblk0p2 ssh quiet" > $MOUNTPOINT/cmdline.txt
+	info "Copying bootloader files '${MOUNTPOINT}'"
+	cp 3rdparty/bootloader/* $MOUNTPOINT
+	cp openelec.ico $MOUNTPOINT
+	cp README.md $MOUNTPOINT
+
+	info "Verifying MD5 checksums of installed SYSTEM and KERNEL"
+	if [ "$(md5 -r "${MOUNTPOINT}/SYSTEM" | sed 's/ .*//')" != "$(cat target/SYSTEM.md5 | sed 's/ .*//')" ]; then
+		error "MD5 checksum failed for SYSTEM"
+	fi
+	if [ "$(md5 -r "${MOUNTPOINT}/kernel.img" | sed 's/ .*//')" != "$(cat target/KERNEL.md5 | sed 's/ .*//')" ]; then
+		error "MD5 checksum failed for KERNEL file."
+	fi
+}
+
+final_cleanup(){
+	unmount_install_device_partitions
+	fsck_msdos -y ${INSTALL_DEVICE}s1
+	sync
+	echo "ALL DONE! ..it's now safe to remove your USB stick"
+	echo ""
+}
+
+md5sumFailed()
+{
+	echo ""
+	echo "#########################################################"
+	echo "#                                                       #"
+	echo "# OpenELEC.tv failed md5 check - Installation will quit #"
+	echo "#                                                       #"
+	echo "#      Your original download was probably corrupt.     #"
+	echo "#   Please visit www.openelec.tv and get another copy   #"
+	echo "#                                                       #"
+	echo "#########################################################"
+	exit 1
+}
+
+check_md5sum(){
+	info "Verifying MD5 checksum of downloaded SYSTEM and KERNEL"
+	test "$(md5 -r target/SYSTEM | sed 's/ .*//')" = "$(cat target/SYSTEM.md5 | sed 's/ .*//')" || md5sumFailed
+	test "$(md5 -r target/KERNEL | sed 's/ .*//')" = "$(cat target/KERNEL.md5 | sed 's/ .*//')" || md5sumFailed
+}
+
+main(){
+	if [ $UID != 0 ];then
+		echo "This script *must* be run as root"
+		exit 1
+	fi
+
+	check_dependencies
+	check_md5sum
+	download_syslinux
+
+	if [ $# -eq 0 ]; then
+		choose_install_device
+		check_install_device
+	else
+		INSTALL_DEVICE="$1"
+		if [ "${INSTALL_DEVICE%disk0}" != "${INSTALL_DEVICE}" ]; then
+			error "Cannot install this on /dev/disk0."
+		fi
+		if [ "${INSTALL_DEVICE#disk}" != "${INSTALL_DEVICE}" ]; then
+			INSTALL_DEVICE="/dev/${INSTALL_DEVICE}"
+		fi
+	fi
+	format_install_device
+	install_bootloader
+	install_files
+	final_cleanup
+	exit 0
+}
+
+main "$@"
+
+
