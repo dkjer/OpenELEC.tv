@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Source for this originated from:
+# http://openelec.tv/forum/64-installation/15116-howto-installing-openelec-on-usb-key-with-solely-mac-osx-command-line
+# Source based off of contributions by tdegrunt, chewitt and relatif from the openelec.tv forum.
+# Modifications to more closely match Linux version of create_sdcard by Don Kjer (don.kjer@gmail.com)
+
 ################################################################################
 #      This file is part of OpenELEC - http://www.openelec.tv
 #      Copyright (C) 2009-2012 Stephan Raue (stephan@openelec.tv)
@@ -20,8 +25,8 @@
 #  http://www.gnu.org/copyleft/gpl.html
 ################################################################################
 
-# usage:   sudo ./create_sdcard [<drive>]
-# example: sudo ./create_sdcard /dev/disk1
+# usage:   sudo ./create_sdcard_osx [<drive>]
+# example: sudo ./create_sdcard_osx /dev/disk1
 
 read_input(){
 	local MESSAGE="${1}"
@@ -131,11 +136,7 @@ unmount_install_device_partitions(){
 	info "Unmounting ${INSTALL_DEVICE}*"
 	diskutil unmountDisk ${INSTALL_DEVICE}
 	if [ $? -ne 0 ]; then
-		#warning "Unmount failed.  Attemping to force unmount of ${INSTALL_DEVICE}*"
-		#diskutil unmountDisk force ${INSTALL_DEVICE}
-		#if [ $? -ne 0 ]; then
-			error "Could not unmount ${INSTALL_DEVICE}*"
-		#fi
+		error "Could not unmount ${INSTALL_DEVICE}*"
 	fi
 }
 
@@ -188,6 +189,7 @@ format_install_device(){
 	if [ -z "${MOUNTPOINT}" ]; then
 		error "Could not find mount point for ${INSTALL_DEVICE}"
 	fi
+	# Create these during the installation process so other processes don't block unmounting.
 	touch "${MOUNTPOINT}/.metadata_never_index"
 	touch "${MOUNTPOINT}/.Trashes"
 	mkdir "${MOUNTPOINT}/.fseventsd"
@@ -249,8 +251,16 @@ install_files(){
 }
 
 final_cleanup(){
+	# Remove OSX garbage files.
+	local device_info=$(diskutil list -plist ${INSTALL_DEVICE}s1)
+	local MOUNTPOINT=$(plist_value "$device_info" MountPoint)
+	if [ -z "${MOUNTPOINT}" ]; then
+		error "Could not find mount point for ${INSTALL_DEVICE}"
+	fi
+	rm -rf ${MOUNTPOINT}/.* >/dev/null 2>&1
 	unmount_install_device_partitions
 	fsck_msdos -y ${INSTALL_DEVICE}s1
+
 	sync
 	echo "ALL DONE! ..it's now safe to remove your USB stick"
 	echo ""
