@@ -127,7 +127,7 @@ download_syslinux(){
 		info "Downloading syslinux"
 		curl -O https://www.kernel.org/pub/linux/utils/boot/syslinux/${SYSLINUX_VERSION}.tar.bz2
 		info "Extracting syslinux files"
-		tar -xzf ${SYSLINUX_VERSION}.tar.bz
+		tar -xzf ${SYSLINUX_VERSION}.tar.bz2
 		set +e
 	fi
 }
